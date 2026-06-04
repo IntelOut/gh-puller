@@ -61,10 +61,10 @@ class CredentialFilter(logging.Filter):
                 'Authorization: Bearer ***REDACTED***',
                 msg
             )
-        if 'x-access-token:' in msg:
+        if '@github.com' in msg:
             msg = re.sub(
-                r'x-access-token:\S+?@',
-                'x-access-token:***REDACTED***@',
+                r'https://[^/\s:]+:[^/\s@]+@',
+                'https://***REDACTED***:***REDACTED***@',
                 msg
             )
         if record.msg != msg or record.args:
@@ -123,13 +123,15 @@ class GitHubRepoPuller:
         """Embed the GitHub token into an HTTPS clone URL for authentication."""
         if not self.github_token or '://' not in url:
             return url
-        return url.replace('https://', f'https://x-access-token:{self.github_token}@')
+        user = self.github_username or 'git'
+        return url.replace('https://', f'https://{user}:{self.github_token}@')
 
     def _clean_url(self, url):
         """Strip embedded credentials from a URL."""
         if not self.github_token or '@' not in url:
             return url
-        return url.replace(f'x-access-token:{self.github_token}@', '')
+        user = self.github_username or 'git'
+        return url.replace(f'{user}:{self.github_token}@', '')
 
     def _git_remote_cmd(self, *args):
         """Build a git command list with auth token passed via HTTP header.

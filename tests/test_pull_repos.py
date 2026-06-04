@@ -413,7 +413,7 @@ class TestFetchPage:
 class TestAuthUrl:
     def test_auth_url_with_token(self, puller):
         result = puller._auth_url('https://github.com/user/repo.git')
-        assert result == 'https://x-access-token:test-token@github.com/user/repo.git'
+        assert result == 'https://test-user:test-token@github.com/user/repo.git'
 
     def test_auth_url_no_token(self):
         puller = GitHubRepoPuller(git_dir='/tmp', github_token=None)
@@ -421,7 +421,17 @@ class TestAuthUrl:
         assert result == 'https://github.com/user/repo.git'
 
     def test_clean_url_with_token(self, puller):
-        dirty = 'https://x-access-token:test-token@github.com/user/repo.git'
+        dirty = 'https://test-user:test-token@github.com/user/repo.git'
+        result = puller._clean_url(dirty)
+        assert result == 'https://github.com/user/repo.git'
+
+    def test_clean_url_no_token(self):
+        puller = GitHubRepoPuller(git_dir='/tmp', github_token=None)
+        result = puller._clean_url('https://github.com/user/repo.git')
+        assert result == 'https://github.com/user/repo.git'
+
+    def test_clean_url_with_token(self, puller):
+        dirty = 'https://test-user:test-token@github.com/user/repo.git'
         result = puller._clean_url(dirty)
         assert result == 'https://github.com/user/repo.git'
 
@@ -476,14 +486,13 @@ class TestCredentialFilter:
         record = logging.LogRecord(
             name='test', level=logging.ERROR,
             pathname='', lineno=0,
-            msg="clone --mirror 'https://x-access-token:ghp_secret123@github.com/user/repo.git'",
+            msg="clone --mirror 'https://IntelOut:ghp_secret123@github.com/user/repo.git'",
             args=(), exc_info=None
         )
         filtr = CredentialFilter()
         filtr.filter(record)
         assert '***REDACTED***' in record.msg
         assert 'ghp_secret123' not in record.msg
-        assert 'x-access-token:***REDACTED***@' in record.msg
 
     def test_no_match_passes_through(self):
         msg = 'Just a normal log message without any token'
