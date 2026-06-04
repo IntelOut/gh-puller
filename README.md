@@ -1,6 +1,6 @@
 # gh-puller
 
-[![CI](https://github.com/YOUR_USER/YOUR_REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_USER/YOUR_REPO/actions/workflows/ci.yml)
+[![CI](https://github.com/IntelOut/gh-puller/actions/workflows/ci.yml/badge.svg)](https://github.com/IntelOut/gh-puller/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
