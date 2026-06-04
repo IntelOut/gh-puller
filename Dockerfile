@@ -11,14 +11,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY pull_repos.py .
 
-RUN mkdir -p /var/log /home/user/git && \
-    chmod 777 /var/log /home/user/git && \
-    useradd -m -u 1000 appuser && \
-    chown -R appuser:appuser /app /home/user/git
+RUN mkdir -p /var/log /home/user/git
 
 VOLUME ["/home/user/git"]
-
-USER appuser
 
 ENV GIT_DIR=/home/user/git \
     PULL_INTERVAL=3600

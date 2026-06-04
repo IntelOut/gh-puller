@@ -92,10 +92,6 @@ class GitHubRepoPuller:
         self.github_token = github_token or os.environ.get('GITHUB_TOKEN')
         self.github_username = os.environ.get('GITHUB_USERNAME')
         self.git_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            self.git_dir.chmod(0o777)
-        except OSError:
-            pass
 
         raw_exclude = exclude_patterns or os.environ.get('EXCLUDE_PATTERNS', '')
         self.exclude_patterns = [
@@ -412,7 +408,7 @@ class GitHubRepoPuller:
         Returns (data, stop) where *data* is the JSON list (empty list = no more
         pages) and *stop* is True when the caller should abort the entire scan.
         """
-        url = f'https://api.github.com/users/{self.github_username}/repos'
+        url = 'https://api.github.com/user/repos'
         headers = {
             'Authorization': f'Bearer {self.github_token}',
             'Accept': 'application/vnd.github.v3+json'
