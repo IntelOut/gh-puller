@@ -23,4 +23,7 @@ USER appuser
 ENV GIT_DIR=/home/user/git \
     PULL_INTERVAL=3600
 
+HEALTHCHECK --interval=60s --timeout=5s --start-period=30s \
+    CMD python3 -c "import os; exit(0 if os.path.exists('/app/pull_repos.py') else 1)"
+
 ENTRYPOINT ["python3", "pull_repos.py"]

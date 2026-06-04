@@ -12,8 +12,11 @@
 - Fetches **every remote branch** (main, develop, feature/*, hotfix/*, etc.)
 - Creates local tracking branches for each remote branch
 - Periodic sync loop (configurable interval)
-- Docker image ready
-- Rate-limit aware GitHub API client with retry
+- **Parallel** clone/update with configurable worker count
+- **Exclude patterns** to skip repositories by name regex
+- **Cached** repository list to avoid redundant API calls
+- Docker image ready with healthcheck
+- Rate-limit aware GitHub API client with retry and backoff
 - Token passed via HTTP header — **never written to disk**
 
 ## Quick start
@@ -50,20 +53,38 @@ docker run -d --name gh-puller \
 | `GITHUB_USERNAME` | — | GitHub username (required) |
 | `GIT_DIR` | `~/git` | Directory where repos are stored |
 | `PULL_INTERVAL` | `3600` | Seconds between sync cycles |
+| `EXCLUDE_PATTERNS` | `` | Comma-separated regex patterns for repo names to skip |
+| `PARALLEL_WORKERS` | `4` | Max parallel clone/update workers |
 
 ## How it works
 
-1. Fetches the repository list via `GET /users/{username}/repos` (paginated, 100 per page)
-2. For each repo:
+1. Fetches the repository list via `GET /users/{username}/repos` (paginated, 100 per page, cached for 5 min)
+2. Filters repositories against `EXCLUDE_PATTERNS`
+3. For each repo (in parallel, up to `PARALLEL_WORKERS`):
    - **Not cloned yet**: `git init` → `git remote add` → `git fetch --all` → tracking branches for every remote branch
-   - **Already exists**: `git fetch --all --prune` → force-update all local branches to match remote → reset default branch
-3. Sleeps `PULL_INTERVAL` seconds and repeats
+   - **Already exists**: `git fetch --all --prune` → force-update all local branches → fast-forward default branch
+4. Sleeps `PULL_INTERVAL` seconds and repeats
+
+## Development
+
+```bash
+pip install -r requirements-dev.txt
+
+# Run all checks
+make check
+
+# Or individually
+make lint        # ruff
+make typecheck   # mypy
+make pylint       # pylint
+make test        # pytest
+```
 
 ## Security
 
 The GitHub token is passed to git via `http.extraHeader` (`Authorization: Bearer ...`).
 It exists only in process memory and is **never** written to `.git/config`, disk, or any
-credential store.
+credential store. A logging filter redacts Bearer tokens from log output.
 
 ## License
 
