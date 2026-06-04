@@ -265,6 +265,10 @@ class GitHubRepoPuller:
             check=False
         )
         self._run(
+            ['git', '-C', str(repo_path), 'checkout', '--detach'],
+            check=False
+        )
+        self._run(
             ['git', '-C', str(repo_path), 'fetch', '--all', '--prune'],
             check=True
         )
