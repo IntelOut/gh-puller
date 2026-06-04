@@ -11,3 +11,5 @@ requirements-dev.txt
 pyproject.toml
 Dockerfile
 .dockerignore
+LICENSE
+Makefile
