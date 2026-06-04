@@ -87,7 +87,7 @@ class GitHubRepoPuller:
                  parallel_workers=None):
         resolved_dir = git_dir if git_dir is not None else os.environ.get('GIT_DIR')
         if resolved_dir is None:
-            resolved_dir = Path.home() / 'git'
+            resolved_dir = Path.home() / 'gits'
         self.git_dir = Path(resolved_dir).expanduser().resolve()
         self.github_token = github_token or os.environ.get('GITHUB_TOKEN')
         self.github_username = os.environ.get('GITHUB_USERNAME')
@@ -134,6 +134,7 @@ class GitHubRepoPuller:
         kwargs.setdefault('capture_output', True)
         kwargs.setdefault('text', True)
         env = _BASE_ENV.copy()
+        env.pop('GIT_DIR', None)
         if extra_env:
             env.update(extra_env)
         kwargs.setdefault('env', env)

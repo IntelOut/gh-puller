@@ -160,6 +160,18 @@ class TestRunExtraEnv:
         puller._run(['git', 'status'], check=False)
         assert mock_run.call_args.kwargs['check'] is False
 
+    @patch('pull_repos.subprocess.run')
+    def test_git_dir_removed(self, mock_run, puller):
+        mock_run.return_value = MagicMock(stdout='', returncode=0)
+        import os
+        os.environ['GIT_DIR'] = '/some/path'
+        try:
+            puller._run(['git', 'status'])
+            env_passed = mock_run.call_args.kwargs['env']
+            assert 'GIT_DIR' not in env_passed
+        finally:
+            os.environ.pop('GIT_DIR', None)
+
 
 class TestGetRemoteUrl:
     @patch('pull_repos.subprocess.run')
