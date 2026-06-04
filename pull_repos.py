@@ -235,6 +235,7 @@ class GitHubRepoPuller:
         Deleted on failure; the caller must handle cleanup.
         """
         self._check_disk_space()
+        clone_url = self._clean_url(clone_url)
         auth_url = self._auth_url(clone_url)
         self._run(['git', 'init', str(repo_path)], check=True)
         self._run(['git', '-C', str(repo_path), 'remote', 'add', 'origin', auth_url], check=True)
@@ -259,6 +260,7 @@ class GitHubRepoPuller:
 
         Returns a list of branch names that were updated.
         """
+        clone_url = self._clean_url(clone_url)
         auth_url = self._auth_url(clone_url)
         self._run(
             ['git', '-C', str(repo_path), 'remote', 'set-url', 'origin', auth_url],
@@ -333,6 +335,7 @@ class GitHubRepoPuller:
         tmp_path = repo_path.with_suffix('.tmp')
         if tmp_path.exists():
             shutil.rmtree(tmp_path, ignore_errors=True)
+        clone_url = self._clean_url(clone_url)
         auth_url = self._auth_url(clone_url)
         self._run(
             ['git', 'clone', '--mirror', auth_url, str(tmp_path)],
