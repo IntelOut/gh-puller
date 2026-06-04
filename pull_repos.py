@@ -8,7 +8,7 @@ Clones / updates all repositories of a GitHub user, fetching every branch
 Environment variables:
     GITHUB_TOKEN        — Personal Access Token (required)
     GITHUB_USERNAME     — GitHub username (required)
-    GIT_DIR             — Target directory for repos (default: ~/git)
+    GIT_DIR             — Target directory for repos (default: /data/gits)
     PULL_INTERVAL       — Sleep seconds between sync cycles (default: 3600)
     EXCLUDE_PATTERNS    — Comma-separated regex patterns for repo names to skip
     PARALLEL_WORKERS    — Max parallel clone/update workers (default: 4)
@@ -17,9 +17,8 @@ The script runs as a daemon: it syncs all repos, sleeps PULL_INTERVAL seconds,
 then repeats indefinitely.
 
 Security notes:
-    - The token is NEVER written to disk. It is passed to git via
-      `http.extraHeader` (Authorization: Bearer ...) and lives only in process
-      memory.
+    - The token is embedded in the clone URL (https://USERNAME:TOKEN@...)
+      and lives only in process memory.
     - The git remote URL stored in .git/config does NOT contain credentials.
 """
 
@@ -94,7 +93,7 @@ class GitHubRepoPuller:
                  parallel_workers=None):
         resolved_dir = git_dir if git_dir is not None else os.environ.get('GIT_DIR')
         if resolved_dir is None:
-            resolved_dir = Path.home() / 'gits'
+            resolved_dir = Path('/data/gits')
         self.git_dir = Path(resolved_dir).expanduser().resolve()
         self.github_token = github_token or os.environ.get('GITHUB_TOKEN')
         self.github_username = os.environ.get('GITHUB_USERNAME')
