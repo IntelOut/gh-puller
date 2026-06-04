@@ -34,11 +34,24 @@ python3 pull_repos.py
 
 ## Docker
 
+Pull the pre-built image (recommended):
+
 ```bash
-# Pre-built image from GitHub Container Registry
 docker pull ghcr.io/intelout/gh-puller:latest
 
-# Or build locally
+mkdir -p repos
+
+docker run -d --name gh-puller \
+  -e GITHUB_TOKEN="ghp_xxx" \
+  -e GITHUB_USERNAME="your-username" \
+  -e PULL_INTERVAL=3600 \
+  -v "${PWD}/repos:/home/user/git" \
+  ghcr.io/intelout/gh-puller:latest
+```
+
+Or build and run locally:
+
+```bash
 docker build -t gh-puller .
 
 mkdir -p repos
@@ -47,8 +60,8 @@ docker run -d --name gh-puller \
   -e GITHUB_TOKEN="ghp_xxx" \
   -e GITHUB_USERNAME="your-username" \
   -e PULL_INTERVAL=3600 \
-  -v "$(pwd)/repos:/home/user/git" \
-  ghcr.io/intelout/gh-puller:latest
+  -v "${PWD}/repos:/home/user/git" \
+  gh-puller
 ```
 
 ## Configuration
