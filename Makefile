@@ -27,5 +27,5 @@ docker-run:
 		-e GITHUB_TOKEN="${GITHUB_TOKEN}" \
 		-e GITHUB_USERNAME="${GITHUB_USERNAME}" \
 		-e PULL_INTERVAL="${PULL_INTERVAL:-3600}" \
-		-v "${PWD}/repos:/data/repos" \
+		-v "/data/repos:/data/repos" \
 		gh-puller
