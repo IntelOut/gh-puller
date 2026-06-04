@@ -61,6 +61,13 @@ class CredentialFilter(logging.Filter):
                 'Authorization: Bearer ***REDACTED***',
                 msg
             )
+        if 'x-access-token:' in msg:
+            msg = re.sub(
+                r'x-access-token:\S+?@',
+                'x-access-token:***REDACTED***@',
+                msg
+            )
+        if record.msg != msg or record.args:
             record.msg = msg
             record.args = ()
         return True
@@ -111,6 +118,18 @@ class GitHubRepoPuller:
             "Working directory: %s (exclude=%d patterns, workers=%d)",
             self.git_dir, len(self.exclude_patterns), self.parallel_workers
         )
+
+    def _auth_url(self, url):
+        """Embed the GitHub token into an HTTPS clone URL for authentication."""
+        if not self.github_token or '://' not in url:
+            return url
+        return url.replace('https://', f'https://x-access-token:{self.github_token}@')
+
+    def _clean_url(self, url):
+        """Strip embedded credentials from a URL."""
+        if not self.github_token or '@' not in url:
+            return url
+        return url.replace(f'x-access-token:{self.github_token}@', '')
 
     def _git_remote_cmd(self, *args):
         """Build a git command list with auth token passed via HTTP header.
@@ -214,8 +233,9 @@ class GitHubRepoPuller:
         Deleted on failure; the caller must handle cleanup.
         """
         self._check_disk_space()
+        auth_url = self._auth_url(clone_url)
         self._run(['git', 'init', str(repo_path)], check=True)
-        self._run(['git', '-C', str(repo_path), 'remote', 'add', 'origin', clone_url], check=True)
+        self._run(['git', '-C', str(repo_path), 'remote', 'add', 'origin', auth_url], check=True)
         self._run(
             ['git', '-C', str(repo_path), 'remote', 'set-branches', 'origin', '*'],
             check=True
@@ -223,6 +243,10 @@ class GitHubRepoPuller:
         self._run(
             self._git_remote_cmd('-C', str(repo_path), 'fetch', '--all', '--prune'),
             check=True
+        )
+        self._run(
+            ['git', '-C', str(repo_path), 'remote', 'set-url', 'origin', clone_url],
+            check=False
         )
         default_branch = self._get_default_branch(repo_path)
         self._run(['git', '-C', str(repo_path), 'checkout', default_branch], check=True)
@@ -233,13 +257,18 @@ class GitHubRepoPuller:
 
         Returns a list of branch names that were updated.
         """
+        auth_url = self._auth_url(clone_url)
         self._run(
-            ['git', '-C', str(repo_path), 'remote', 'set-url', 'origin', clone_url],
+            ['git', '-C', str(repo_path), 'remote', 'set-url', 'origin', auth_url],
             check=False
         )
         self._run(
             self._git_remote_cmd('-C', str(repo_path), 'fetch', '--all', '--prune'),
             check=True
+        )
+        self._run(
+            ['git', '-C', str(repo_path), 'remote', 'set-url', 'origin', clone_url],
+            check=False
         )
         result = self._run(
             ['git', '-C', str(repo_path), 'rev-parse', '--abbrev-ref', 'HEAD']
@@ -298,8 +327,9 @@ class GitHubRepoPuller:
         tmp_path = repo_path.with_suffix('.tmp')
         if tmp_path.exists():
             shutil.rmtree(tmp_path, ignore_errors=True)
+        auth_url = self._auth_url(clone_url)
         self._run(
-            self._git_remote_cmd('clone', '--mirror', clone_url, str(tmp_path)),
+            self._git_remote_cmd('clone', '--mirror', auth_url, str(tmp_path)),
             check=True
         )
         self._run(
@@ -307,6 +337,10 @@ class GitHubRepoPuller:
             check=False
         )
         self._run(['git', '-C', str(tmp_path), 'reset', '--hard', 'HEAD'], check=False)
+        self._run(
+            ['git', '-C', str(tmp_path), 'remote', 'set-url', 'origin', clone_url],
+            check=False
+        )
         if repo_path.exists():
             shutil.rmtree(repo_path, ignore_errors=True)
         tmp_path.rename(repo_path)

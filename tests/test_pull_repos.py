@@ -410,6 +410,27 @@ class TestFetchPage:
         assert mock_get.call_count == 3
 
 
+class TestAuthUrl:
+    def test_auth_url_with_token(self, puller):
+        result = puller._auth_url('https://github.com/user/repo.git')
+        assert result == 'https://x-access-token:test-token@github.com/user/repo.git'
+
+    def test_auth_url_no_token(self):
+        puller = GitHubRepoPuller(git_dir='/tmp', github_token=None)
+        result = puller._auth_url('https://github.com/user/repo.git')
+        assert result == 'https://github.com/user/repo.git'
+
+    def test_clean_url_with_token(self, puller):
+        dirty = 'https://x-access-token:test-token@github.com/user/repo.git'
+        result = puller._clean_url(dirty)
+        assert result == 'https://github.com/user/repo.git'
+
+    def test_clean_url_no_token(self):
+        puller = GitHubRepoPuller(git_dir='/tmp', github_token=None)
+        result = puller._clean_url('https://github.com/user/repo.git')
+        assert result == 'https://github.com/user/repo.git'
+
+
 class TestCredentialFilter:
     def test_redact_keeps_surrounding_quotes(self):
         log_message = (
@@ -450,6 +471,19 @@ class TestCredentialFilter:
         filtr.filter(record)
         assert '***REDACTED***' in record.msg
         assert 'ghp_abc123' not in record.msg
+
+    def test_redact_url_token(self):
+        record = logging.LogRecord(
+            name='test', level=logging.ERROR,
+            pathname='', lineno=0,
+            msg="clone --mirror 'https://x-access-token:ghp_secret123@github.com/user/repo.git'",
+            args=(), exc_info=None
+        )
+        filtr = CredentialFilter()
+        filtr.filter(record)
+        assert '***REDACTED***' in record.msg
+        assert 'ghp_secret123' not in record.msg
+        assert 'x-access-token:***REDACTED***@' in record.msg
 
     def test_no_match_passes_through(self):
         msg = 'Just a normal log message without any token'
