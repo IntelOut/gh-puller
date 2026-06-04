@@ -243,7 +243,7 @@ class GitHubRepoPuller:
             check=True
         )
         self._run(
-            self._git_remote_cmd('-C', str(repo_path), 'fetch', '--all', '--prune'),
+            ['git', '-C', str(repo_path), 'fetch', '--all', '--prune'],
             check=True
         )
         self._run(
@@ -265,7 +265,7 @@ class GitHubRepoPuller:
             check=False
         )
         self._run(
-            self._git_remote_cmd('-C', str(repo_path), 'fetch', '--all', '--prune'),
+            ['git', '-C', str(repo_path), 'fetch', '--all', '--prune'],
             check=True
         )
         self._run(
@@ -331,7 +331,7 @@ class GitHubRepoPuller:
             shutil.rmtree(tmp_path, ignore_errors=True)
         auth_url = self._auth_url(clone_url)
         self._run(
-            self._git_remote_cmd('clone', '--mirror', auth_url, str(tmp_path)),
+            ['git', 'clone', '--mirror', auth_url, str(tmp_path)],
             check=True
         )
         self._run(
