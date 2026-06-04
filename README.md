@@ -39,13 +39,13 @@ Pull the pre-built image (recommended):
 ```bash
 docker pull ghcr.io/intelout/gh-puller:latest
 
-mkdir -p repos
+mkdir -p git
 
 docker run -d --name gh-puller \
   -e GITHUB_TOKEN="ghp_xxx" \
   -e GITHUB_USERNAME="your-username" \
   -e PULL_INTERVAL=3600 \
-  -v "${PWD}/repos:/home/user/git" \
+  -v "${PWD}/git:/home/user/git" \
   ghcr.io/intelout/gh-puller:latest
 ```
 
@@ -54,13 +54,13 @@ Or build and run locally:
 ```bash
 docker build -t gh-puller .
 
-mkdir -p repos
+mkdir -p git
 
 docker run -d --name gh-puller \
   -e GITHUB_TOKEN="ghp_xxx" \
   -e GITHUB_USERNAME="your-username" \
   -e PULL_INTERVAL=3600 \
-  -v "${PWD}/repos:/home/user/git" \
+  -v "${PWD}/git:/home/user/git" \
   gh-puller
 ```
 

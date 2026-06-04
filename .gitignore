@@ -25,5 +25,5 @@ build/
 Thumbs.db
 
 # Project-specific
-repos/
+git/
 *.log
