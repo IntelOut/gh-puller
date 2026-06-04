@@ -48,13 +48,13 @@ Pull the pre-built image (recommended):
 ```bash
 docker pull ghcr.io/intelout/gh-puller:latest
 
-mkdir -p data
+mkdir -p repos
 
 docker run -d --name gh-puller \
   -e GITHUB_TOKEN="ghp_xxx" \
   -e GITHUB_USERNAME="your-username" \
   -e PULL_INTERVAL=3600 \
-  -v "${PWD}/data:/data" \
+  -v "${PWD}/repos:/data/repos" \
   ghcr.io/intelout/gh-puller:latest
 ```
 
@@ -63,13 +63,13 @@ Or build and run locally:
 ```bash
 docker build -t gh-puller .
 
-mkdir -p data
+mkdir -p repos
 
 docker run -d --name gh-puller \
   -e GITHUB_TOKEN="ghp_xxx" \
   -e GITHUB_USERNAME="your-username" \
   -e PULL_INTERVAL=3600 \
-  -v "${PWD}/data:/data" \
+  -v "${PWD}/repos:/data/repos" \
   gh-puller
 ```
 
@@ -79,7 +79,7 @@ docker run -d --name gh-puller \
 |---|---|---|
 | `GITHUB_TOKEN` | — | GitHub Classic PAT with `repo` scope (required) |
 | `GITHUB_USERNAME` | — | GitHub username (required) |
-| `GIT_DIR` | `/data/gits` | Directory where repos are stored |
+| `GIT_DIR` | `/data/repos` | Directory where repos are stored |
 | `PULL_INTERVAL` | `3600` | Seconds between sync cycles |
 | `EXCLUDE_PATTERNS` | `` | Comma-separated regex patterns for repo names to skip |
 | `PARALLEL_WORKERS` | `4` | Max parallel clone/update workers |

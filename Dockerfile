@@ -11,11 +11,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY pull_repos.py .
 
-RUN mkdir -p /var/log /data/gits
+RUN mkdir -p /var/log /data/repos
 
-VOLUME ["/data/gits"]
+VOLUME ["/data/repos"]
 
-ENV GIT_DIR=/data/gits \
+ENV GIT_DIR=/data/repos \
     PULL_INTERVAL=3600
 
 HEALTHCHECK --interval=60s --timeout=5s --start-period=30s \

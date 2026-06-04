@@ -8,7 +8,7 @@ Clones / updates all repositories of a GitHub user, fetching every branch
 Environment variables:
     GITHUB_TOKEN        — Personal Access Token (required)
     GITHUB_USERNAME     — GitHub username (required)
-    GIT_DIR             — Target directory for repos (default: /data/gits)
+    GIT_DIR             — Target directory for repos (default: /data/repos)
     PULL_INTERVAL       — Sleep seconds between sync cycles (default: 3600)
     EXCLUDE_PATTERNS    — Comma-separated regex patterns for repo names to skip
     PARALLEL_WORKERS    — Max parallel clone/update workers (default: 4)
@@ -93,7 +93,7 @@ class GitHubRepoPuller:
                  parallel_workers=None):
         resolved_dir = git_dir if git_dir is not None else os.environ.get('GIT_DIR')
         if resolved_dir is None:
-            resolved_dir = Path('/data/gits')
+            resolved_dir = Path('/data/repos')
         self.git_dir = Path(resolved_dir).expanduser().resolve()
         self.github_token = github_token or os.environ.get('GITHUB_TOKEN')
         self.github_username = os.environ.get('GITHUB_USERNAME')

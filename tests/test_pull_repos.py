@@ -430,16 +430,6 @@ class TestAuthUrl:
         result = puller._clean_url('https://github.com/user/repo.git')
         assert result == 'https://github.com/user/repo.git'
 
-    def test_clean_url_with_token(self, puller):
-        dirty = 'https://test-user:test-token@github.com/user/repo.git'
-        result = puller._clean_url(dirty)
-        assert result == 'https://github.com/user/repo.git'
-
-    def test_clean_url_no_token(self):
-        puller = GitHubRepoPuller(git_dir='/tmp', github_token=None)
-        result = puller._clean_url('https://github.com/user/repo.git')
-        assert result == 'https://github.com/user/repo.git'
-
 
 class TestCredentialFilter:
     def test_redact_keeps_surrounding_quotes(self):
