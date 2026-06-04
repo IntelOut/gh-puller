@@ -92,6 +92,10 @@ class GitHubRepoPuller:
         self.github_token = github_token or os.environ.get('GITHUB_TOKEN')
         self.github_username = os.environ.get('GITHUB_USERNAME')
         self.git_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.git_dir.chmod(0o777)
+        except OSError:
+            pass
 
         raw_exclude = exclude_patterns or os.environ.get('EXCLUDE_PATTERNS', '')
         self.exclude_patterns = [
