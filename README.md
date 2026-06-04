@@ -1,6 +1,8 @@
 # gh-puller
 
 [![CI](https://github.com/IntelOut/gh-puller/actions/workflows/ci.yml/badge.svg)](https://github.com/IntelOut/gh-puller/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/IntelOut/gh-puller?logo=github)](https://github.com/IntelOut/gh-puller/releases/latest)
+[![Docker image](https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker)](https://github.com/IntelOut/gh-puller/pkgs/container/gh-puller)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
@@ -33,6 +35,10 @@ python3 pull_repos.py
 ## Docker
 
 ```bash
+# Pre-built image from GitHub Container Registry
+docker pull ghcr.io/intelout/gh-puller:latest
+
+# Or build locally
 docker build -t gh-puller .
 
 mkdir -p repos
@@ -42,7 +48,7 @@ docker run -d --name gh-puller \
   -e GITHUB_USERNAME="your-username" \
   -e PULL_INTERVAL=3600 \
   -v "$(pwd)/repos:/home/user/git" \
-  gh-puller
+  ghcr.io/intelout/gh-puller:latest
 ```
 
 ## Configuration

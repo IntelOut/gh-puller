@@ -20,6 +20,7 @@ clean:
 
 docker-build:
 	docker build -t gh-puller .
+	docker tag gh-puller ghcr.io/intelout/gh-puller:latest
 
 docker-run:
 	docker run --rm -it \
