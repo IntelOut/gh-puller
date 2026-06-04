@@ -57,7 +57,7 @@ class CredentialFilter(logging.Filter):
         msg = record.getMessage()
         if 'Authorization: Bearer ' in msg:
             msg = re.sub(
-                r'Authorization: Bearer \S+',
+                r'Authorization: Bearer \S+?(?=[\s\'\",\]\)]|$)',
                 'Authorization: Bearer ***REDACTED***',
                 msg
             )
@@ -67,6 +67,14 @@ class CredentialFilter(logging.Filter):
 
 
 logging.getLogger().addFilter(CredentialFilter())
+
+_BASE_ENV = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
+
+
+def _error_detail(exc):
+    """Return stderr from a subprocess error, falling back to str(exc)."""
+    stderr = getattr(exc, 'stderr', None)
+    return stderr.strip() if stderr else str(exc)
 
 
 class GitHubRepoPuller:
@@ -117,11 +125,18 @@ class GitHubRepoPuller:
         cmd.extend(args)
         return cmd
 
-    def _run(self, cmd, check=True, **kwargs):
-        """Wrapper around subprocess.run with a default timeout."""
+    def _run(self, cmd, check=True, extra_env=None, **kwargs):
+        """Wrapper around subprocess.run with a default timeout.
+
+        *extra_env* — optional dict of additional environment variable overrides.
+        """
         kwargs.setdefault('timeout', self._GIT_TIMEOUT)
         kwargs.setdefault('capture_output', True)
         kwargs.setdefault('text', True)
+        env = _BASE_ENV.copy()
+        if extra_env:
+            env.update(extra_env)
+        kwargs.setdefault('env', env)
         return subprocess.run(cmd, check=check, **kwargs)
 
     def _check_disk_space(self, min_gb=1):
@@ -323,7 +338,7 @@ class GitHubRepoPuller:
             logging.info("Cloned all branches of %s", repo_name)
             return {'status': 'cloned', 'message': f"All branches cloned for {repo_name}"}
         except (subprocess.CalledProcessError, OSError) as e:
-            logging.error("Failed to clone %s: %s", repo_name, e)
+            logging.error("Failed to clone %s: %s", repo_name, _error_detail(e))
             if repo_path.exists():
                 shutil.rmtree(repo_path, ignore_errors=True)
             try:
@@ -335,7 +350,10 @@ class GitHubRepoPuller:
                     'message': f"All branches cloned for {repo_name} (fallback)"
                 }
             except Exception as fallback_err:
-                logging.error("Fallback also failed for %s: %s", repo_name, fallback_err)
+                logging.error(
+                    "Fallback also failed for %s: %s",
+                    repo_name, _error_detail(fallback_err)
+                )
                 if repo_path.exists():
                     shutil.rmtree(repo_path, ignore_errors=True)
                 return {'status': 'error', 'message': str(fallback_err)}
