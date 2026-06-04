@@ -54,7 +54,7 @@ docker run -d --name gh-puller \
   -e GITHUB_TOKEN="ghp_xxx" \
   -e GITHUB_USERNAME="your-username" \
   -e PULL_INTERVAL=3600 \
-  -v "${PWD}/repos:/data/repos" \
+  -v "/data/repos:/data/repos" \
   ghcr.io/intelout/gh-puller:latest
 ```
 
@@ -69,7 +69,7 @@ docker run -d --name gh-puller \
   -e GITHUB_TOKEN="ghp_xxx" \
   -e GITHUB_USERNAME="your-username" \
   -e PULL_INTERVAL=3600 \
-  -v "${PWD}/repos:/data/repos" \
+  -v "/data/repos:/data/repos" \
   gh-puller
 ```
 
