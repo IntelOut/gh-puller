@@ -207,8 +207,8 @@ class TestGetDefaultBranch:
             def side_effect(cmd, **kwargs):
                 if 'symbolic-ref' in cmd:
                     return MagicMock(stdout='', returncode=1)
-                if 'show-ref' in cmd and cmd[-1].endswith('/master'):
-                    return MagicMock(stdout='abc123 refs/heads/master', returncode=0)
+                if 'show-ref' in cmd and cmd[-1].endswith('/origin/master'):
+                    return MagicMock(stdout='abc123 refs/remotes/origin/master', returncode=0)
                 return MagicMock(stdout='', returncode=1)
             mock_run.side_effect = side_effect
             result = puller._get_default_branch(Path(tmp))

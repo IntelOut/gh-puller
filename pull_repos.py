@@ -184,7 +184,7 @@ class GitHubRepoPuller:
             pass
         for candidate in ('main', 'master'):
             result = self._run(
-                ['git', '-C', str(repo_path), 'show-ref', f'refs/heads/{candidate}'],
+                ['git', '-C', str(repo_path), 'show-ref', f'refs/remotes/origin/{candidate}'],
                 check=False
             )
             if result.returncode == 0:
