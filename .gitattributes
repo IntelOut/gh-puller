@@ -1,0 +1,29 @@
+# Normalize line endings
+* text=auto eol=lf
+
+# Python sources
+*.py text diff=python
+
+# Docs
+*.md text diff=markdown
+*.rst text
+
+# Config
+*.toml text
+*.yml text
+*.yaml text
+*.cfg text
+*.ini text
+*.conf text
+
+# Docker
+Dockerfile text
+
+# Git
+.gitattributes text
+.gitignore text
+
+# Binary / generated
+*.pyc binary
+*.pyo binary
+__pycache__ binary

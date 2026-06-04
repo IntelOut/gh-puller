@@ -1,0 +1,420 @@
+#!/usr/bin/env python3
+"""
+GitHub All-Branches Repository Puller.
+
+Clones / updates all repositories of a GitHub user, fetching every branch
+(main, develop, feature/*, etc.) — not just the default branch.
+
+Environment variables:
+    GITHUB_TOKEN       — Personal Access Token (required)
+    GITHUB_USERNAME    — GitHub username (required)
+    GIT_DIR            — Target directory for repos (default: ~/git)
+    PULL_INTERVAL      — Sleep seconds between sync cycles (default: 3600)
+
+The script runs as a daemon: it syncs all repos, sleeps PULL_INTERVAL seconds,
+then repeats indefinitely.
+
+Security notes:
+    - The token is NEVER written to disk. It is passed to git via
+      `http.extraHeader` (Authorization: Bearer ...) and lives only in process
+      memory.
+    - The git remote URL stored in .git/config does NOT contain credentials.
+"""
+
+import os
+import subprocess
+import logging
+import time
+import shutil
+from pathlib import Path
+from datetime import datetime
+from urllib.parse import urlparse
+import sys
+import tempfile
+import stat
+import requests
+
+_LOG_DIR = Path.home() / '.local' / 'share' / 'gh-puller'
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+_LOG_FILE = _LOG_DIR / 'git-puller.log'
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(str(_LOG_FILE)),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+
+class GitHubRepoPuller:
+    """Mirrors every repository of a GitHub user, preserving all branches."""
+
+    _GIT_TIMEOUT = 300
+
+    def __init__(self, git_dir=None, github_token=None):
+        resolved_dir = git_dir if git_dir is not None else os.environ.get('GIT_DIR')
+        if resolved_dir is None:
+            resolved_dir = Path.home() / 'git'
+        self.git_dir = Path(resolved_dir)
+        self.github_token = github_token or os.environ.get('GITHUB_TOKEN')
+        self.github_username = os.environ.get('GITHUB_USERNAME')
+        self.git_dir.mkdir(parents=True, exist_ok=True)
+        logging.info("Working directory: %s", self.git_dir)
+
+    def _git_remote_cmd(self, *args):
+        """Build a git command list with auth token passed via HTTP header.
+
+        The token is injected as an http.extraHeader config to each git
+        invocation that reaches the network.  It is never written to
+        .git/config or any other file on disk.
+        """
+        cmd = ['git']
+        if self.github_token:
+            cmd.extend(['-c', f'http.extraHeader=Authorization: Bearer {self.github_token}'])
+        cmd.extend(args)
+        return cmd
+
+    def _run(self, cmd, check=True, **kwargs):
+        """Wrapper around subprocess.run with a default timeout."""
+        kwargs.setdefault('timeout', self._GIT_TIMEOUT)
+        kwargs.setdefault('capture_output', True)
+        kwargs.setdefault('text', True)
+        return subprocess.run(cmd, check=check, **kwargs)
+
+    def _check_disk_space(self, min_gb=1):
+        """Raise OSError if free disk space falls below *min_gb* gigabytes."""
+        usage = shutil.disk_usage(self.git_dir)
+        free_gb = usage.free / (1024 ** 3)
+        if free_gb < min_gb:
+            raise OSError(f"Only {free_gb:.1f} GB free, need at least {min_gb} GB")
+
+    def _get_default_branch(self, repo_path):
+        """Detect the repository's default branch (origin/HEAD -> main/master).
+
+        Falls back to 'main' if detection fails.
+        """
+        try:
+            result = self._run(
+                ['git', '-C', str(repo_path), 'symbolic-ref', 'refs/remotes/origin/HEAD'],
+                check=False
+            )
+            if result.returncode == 0:
+                return result.stdout.strip().replace('refs/remotes/origin/', '')
+        except Exception:
+            pass
+        for candidate in ('main', 'master'):
+            result = self._run(
+                ['git', '-C', str(repo_path), 'show-ref', f'refs/heads/{candidate}'],
+                check=False
+            )
+            if result.returncode == 0:
+                return candidate
+        return 'main'
+
+    def _create_local_tracking_branches(self, repo_path):
+        """Create a local tracking branch for every remote branch that lacks one.
+
+        Skips symbolic refs (e.g. origin/HEAD) and existing local branches.
+        """
+        result = self._run(
+            ['git', '-C', str(repo_path), 'branch', '-r'], check=True
+        )
+        for line in result.stdout.strip().split('\n'):
+            line = line.strip()
+            if not line or ' -> ' in line:
+                continue
+            if not line.startswith('origin/'):
+                continue
+            local_branch = line.replace('origin/', '', 1)
+            exists = self._run(
+                ['git', '-C', str(repo_path), 'show-ref', '--verify', f'refs/heads/{local_branch}'],
+                check=False
+            )
+            if exists.returncode != 0:
+                self._run(
+                    ['git', '-C', str(repo_path), 'branch', '--track', local_branch, line]
+                )
+
+    def _clone_with_all_branches(self, repo_name, repo_path, clone_url):
+        """Perform a full clone of every remote branch into *repo_path*.
+
+        Strategy:
+          1. git init + remote add origin
+          2. git remote set-branches origin '*'   — track every branch
+          3. git fetch --all --prune               — fetch all refs (auth header)
+          4. git checkout <default>                — working tree on default branch
+          5. create local tracking branches for the rest
+
+        Deleted on failure; the caller must handle cleanup.
+        """
+        self._check_disk_space()
+        self._run(['git', 'init', str(repo_path)], check=True)
+        self._run(['git', '-C', str(repo_path), 'remote', 'add', 'origin', clone_url], check=True)
+        self._run(['git', '-C', str(repo_path), 'remote', 'set-branches', 'origin', '*'], check=True)
+        self._run(self._git_remote_cmd('-C', str(repo_path), 'fetch', '--all', '--prune'), check=True)
+        default_branch = self._get_default_branch(repo_path)
+        self._run(['git', '-C', str(repo_path), 'checkout', default_branch], check=True)
+        self._create_local_tracking_branches(repo_path)
+
+    def _update_all_branches(self, repo_path, clone_url):
+        """Fetch and force-update every local branch.
+
+        Returns a list of branch names that were updated.
+        """
+        self._run(
+            ['git', '-C', str(repo_path), 'remote', 'set-url', 'origin', clone_url],
+            check=False
+        )
+        self._run(
+            self._git_remote_cmd('-C', str(repo_path), 'fetch', '--all', '--prune'),
+            check=True
+        )
+        result = self._run(
+            ['git', '-C', str(repo_path), 'rev-parse', '--abbrev-ref', 'HEAD']
+        )
+        current_branch = result.stdout.strip()
+
+        updated = []
+        remote_result = self._run(
+            ['git', '-C', str(repo_path), 'branch', '-r'], check=True
+        )
+        for line in remote_result.stdout.strip().split('\n'):
+            line = line.strip()
+            if not line or ' -> ' in line or not line.startswith('origin/'):
+                continue
+            lb = line.replace('origin/', '', 1)
+            if lb == current_branch:
+                continue
+            exists = self._run(
+                ['git', '-C', str(repo_path), 'show-ref', '--verify', f'refs/heads/{lb}'],
+                check=False
+            )
+            try:
+                if exists.returncode == 0:
+                    self._run(
+                        ['git', '-C', str(repo_path), 'branch', '--force', lb, line],
+                        check=True
+                    )
+                else:
+                    self._run(
+                        ['git', '-C', str(repo_path), 'branch', '--track', lb, line],
+                        check=True
+                    )
+                updated.append(lb)
+            except subprocess.CalledProcessError as e:
+                logging.warning("  Could not update branch %s: %s", lb, e.stderr.strip())
+
+        default_branch = self._get_default_branch(repo_path)
+        try:
+            self._run(
+                ['git', '-C', str(repo_path), 'checkout', '--force', default_branch],
+                check=True
+            )
+            self._run(
+                ['git', '-C', str(repo_path), 'reset', '--hard', f'origin/{default_branch}'],
+                check=False
+            )
+        except subprocess.CalledProcessError as e:
+            logging.warning(
+                "  Could not checkout default branch %s: %s",
+                default_branch, e.stderr.strip()
+            )
+        return updated
+
+    def _clone_fallback(self, clone_url, repo_path):
+        """Fallback: bare clone + conversion if the init-based flow fails."""
+        tmp_path = repo_path.with_suffix('.tmp')
+        if tmp_path.exists():
+            shutil.rmtree(tmp_path, ignore_errors=True)
+        self._run(
+            self._git_remote_cmd('clone', '--mirror', clone_url, str(tmp_path)),
+            check=True
+        )
+        self._run(['git', '-C', str(tmp_path), 'config', '--local', 'core.bare', 'false'], check=False)
+        self._run(['git', '-C', str(tmp_path), 'reset', '--hard', 'HEAD'], check=False)
+        if repo_path.exists():
+            shutil.rmtree(repo_path, ignore_errors=True)
+        tmp_path.rename(repo_path)
+
+    def clone_full_repo(self, repo_info):
+        """Clone or update a single repository based on its GitHub API info dict.
+
+        Expected keys: 'name', 'clone_url'.
+        Returns a status dict: {'status': 'cloned'|'updated'|'up_to_date'|'error', 'message': ...}
+        """
+        repo_name = repo_info['name']
+        repo_path = self.git_dir / repo_name
+        clone_url = repo_info['clone_url']
+
+        if repo_path.exists():
+            return self._update(repo_path, repo_name)
+
+        logging.info("Cloning repository (all branches): %s", repo_name)
+        try:
+            self._clone_with_all_branches(repo_name, repo_path, clone_url)
+            self.log_all_branches(repo_path)
+            logging.info("Cloned all branches of %s", repo_name)
+            return {'status': 'cloned', 'message': f"All branches cloned for {repo_name}"}
+        except (subprocess.CalledProcessError, OSError) as e:
+            logging.error("Failed to clone %s: %s", repo_name, e)
+            if repo_path.exists():
+                shutil.rmtree(repo_path, ignore_errors=True)
+            try:
+                logging.info("Retrying with fallback method for %s", repo_name)
+                self._clone_fallback(clone_url, repo_path)
+                self.log_all_branches(repo_path)
+                return {'status': 'cloned', 'message': f"All branches cloned for {repo_name} (fallback)"}
+            except Exception as fallback_err:
+                logging.error("Fallback also failed for %s: %s", repo_name, fallback_err)
+                if repo_path.exists():
+                    shutil.rmtree(repo_path, ignore_errors=True)
+                return {'status': 'error', 'message': str(fallback_err)}
+
+    def _update(self, repo_path, repo_name):
+        """Update all existing local branches from the remote origin."""
+        clone_url = self._get_remote_url(repo_path)
+        if not clone_url:
+            return {'status': 'error', 'message': 'No remote origin found'}
+
+        logging.info("Updating repository: %s", repo_name)
+        try:
+            updated = self._update_all_branches(repo_path, clone_url)
+            if updated:
+                logging.info("Updated %d branches in %s", len(updated), repo_name)
+                preview = ', '.join(updated[:5])
+                if len(updated) > 5:
+                    preview += '...'
+                return {'status': 'updated', 'message': f"Updated branches: {preview}"}
+            return {'status': 'up_to_date', 'message': 'All branches up to date'}
+        except subprocess.CalledProcessError as e:
+            logging.error("Failed to update %s: %s", repo_name, e.stderr)
+            return {'status': 'error', 'message': e.stderr}
+        except Exception as e:
+            logging.error("Failed to update %s: %s", repo_name, e)
+            return {'status': 'error', 'message': str(e)}
+
+    def _get_remote_url(self, repo_path):
+        """Return the 'origin' remote URL of the repository at *repo_path*, or None."""
+        try:
+            result = self._run(
+                ['git', '-C', str(repo_path), 'remote', 'get-url', 'origin']
+            )
+            return result.stdout.strip()
+        except subprocess.CalledProcessError:
+            return None
+
+    def log_all_branches(self, repo_path):
+        """Log the total number of branches (local + remote) for a repository."""
+        try:
+            result = self._run(
+                ['git', '-C', str(repo_path), 'branch', '-a'], check=True
+            )
+            branches = [b for b in result.stdout.strip().split('\n') if b.strip()]
+            logging.info("  Branches in %s: %d branches", repo_path.name, len(branches))
+        except Exception as e:
+            logging.warning("  Could not list branches for %s: %s", repo_path.name, e)
+
+    def get_user_repos_from_api(self):
+        """Fetch the list of repositories for the configured GitHub user via REST API.
+
+        Handles pagination (100 per page) and rate-limit errors.
+        Implements retry with backoff on transient failures.
+        Returns a list of dicts as returned by the GitHub API.
+        """
+        if not self.github_token or not self.github_username:
+            return []
+        headers = {
+            'Authorization': f'Bearer {self.github_token}',
+            'Accept': 'application/vnd.github.v3+json'
+        }
+        repos = []
+        page = 1
+        max_retries = 3
+        while True:
+            url = f'https://api.github.com/users/{self.github_username}/repos'
+            params = {'page': page, 'per_page': 100, 'type': 'all'}
+            for attempt in range(max_retries):
+                try:
+                    response = requests.get(url, headers=headers, params=params, timeout=30)
+                    if response.status_code == 401:
+                        logging.error("GitHub API authentication failed — check GITHUB_TOKEN")
+                        return repos
+                    if response.status_code == 403:
+                        remaining = response.headers.get('X-RateLimit-Remaining', '0')
+                        logging.error("GitHub API rate limit exceeded (remaining: %s)", remaining)
+                        return repos
+                    if response.status_code == 200:
+                        data = response.json()
+                        if not data:
+                            return repos
+                        repos.extend(data)
+                        page += 1
+                        break
+                    logging.warning(
+                        "API returned HTTP %d for page %d (attempt %d/%d)",
+                        response.status_code, page, attempt + 1, max_retries
+                    )
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+                    else:
+                        return repos
+                except requests.RequestException as e:
+                    logging.error("GitHub API error (attempt %d/%d): %s", attempt + 1, max_retries, e)
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+                    else:
+                        return repos
+        logging.info("Found %d repositories via GitHub API", len(repos))
+        return repos
+
+    def run(self):
+        """Execute one full sync cycle: list repos, clone/update each, print summary."""
+        logging.info("=" * 50)
+        logging.info("Starting sync at %s", datetime.now().isoformat())
+        if not self.github_token or not self.github_username:
+            logging.error("GITHUB_TOKEN and GITHUB_USERNAME must be set!")
+            return
+        stats = {'cloned': 0, 'updated': 0, 'up_to_date': 0, 'errors': 0}
+        repos_from_api = self.get_user_repos_from_api()
+        for repo_info in repos_from_api:
+            result = self.clone_full_repo(repo_info)
+            if result['status'] == 'cloned':
+                stats['cloned'] += 1
+                logging.info("  Cloned: %s (all branches)", repo_info['name'])
+            elif result['status'] == 'updated':
+                stats['updated'] += 1
+                logging.info("  Updated: %s - %s", repo_info['name'], result['message'])
+            elif result['status'] == 'up_to_date':
+                stats['up_to_date'] += 1
+                logging.info("  Up to date: %s", repo_info['name'])
+            else:
+                stats['errors'] += 1
+                logging.error("  Error: %s - %s", repo_info['name'], result['message'])
+        logging.info(
+            "Summary - Cloned: %d, Updated: %d, Up to date: %d, Errors: %d",
+            stats['cloned'], stats['updated'], stats['up_to_date'], stats['errors']
+        )
+
+
+def main():
+    """Entry point: read env, create puller, loop forever."""
+    git_dir = os.environ.get('GIT_DIR')
+    interval = int(os.environ.get('PULL_INTERVAL', 3600))
+    puller = GitHubRepoPuller(git_dir)
+    while True:
+        try:
+            puller.run()
+            logging.info("Waiting %d seconds until next run...", interval)
+            time.sleep(interval)
+        except KeyboardInterrupt:
+            logging.info("Shutting down...")
+            break
+        except Exception as e:
+            logging.error("Unexpected error: %s", e)
+            time.sleep(interval)
+
+
+if __name__ == '__main__':
+    main()
