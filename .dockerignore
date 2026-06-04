@@ -1,0 +1,13 @@
+.git/
+.gitattributes
+.gitignore
+.github/
+__pycache__/
+*.pyc
+*.pyo
+.env
+README.md
+requirements-dev.txt
+pyproject.toml
+Dockerfile
+.dockerignore

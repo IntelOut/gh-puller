@@ -21,17 +21,15 @@ Security notes:
     - The git remote URL stored in .git/config does NOT contain credentials.
 """
 
-import os
-import subprocess
 import logging
-import time
+import os
 import shutil
-from pathlib import Path
-from datetime import datetime
-from urllib.parse import urlparse
+import subprocess
 import sys
-import tempfile
-import stat
+import time
+from datetime import datetime
+from pathlib import Path
+
 import requests
 
 _LOG_DIR = Path.home() / '.local' / 'share' / 'gh-puller'
@@ -52,6 +50,7 @@ class GitHubRepoPuller:
     """Mirrors every repository of a GitHub user, preserving all branches."""
 
     _GIT_TIMEOUT = 300
+    _API_MAX_RETRIES = 3
 
     def __init__(self, git_dir=None, github_token=None):
         resolved_dir = git_dir if git_dir is not None else os.environ.get('GIT_DIR')
@@ -137,7 +136,7 @@ class GitHubRepoPuller:
                     ['git', '-C', str(repo_path), 'branch', '--track', local_branch, line]
                 )
 
-    def _clone_with_all_branches(self, repo_name, repo_path, clone_url):
+    def _clone_with_all_branches(self, repo_path, clone_url):
         """Perform a full clone of every remote branch into *repo_path*.
 
         Strategy:
@@ -152,8 +151,14 @@ class GitHubRepoPuller:
         self._check_disk_space()
         self._run(['git', 'init', str(repo_path)], check=True)
         self._run(['git', '-C', str(repo_path), 'remote', 'add', 'origin', clone_url], check=True)
-        self._run(['git', '-C', str(repo_path), 'remote', 'set-branches', 'origin', '*'], check=True)
-        self._run(self._git_remote_cmd('-C', str(repo_path), 'fetch', '--all', '--prune'), check=True)
+        self._run(
+            ['git', '-C', str(repo_path), 'remote', 'set-branches', 'origin', '*'],
+            check=True
+        )
+        self._run(
+            self._git_remote_cmd('-C', str(repo_path), 'fetch', '--all', '--prune'),
+            check=True
+        )
         default_branch = self._get_default_branch(repo_path)
         self._run(['git', '-C', str(repo_path), 'checkout', default_branch], check=True)
         self._create_local_tracking_branches(repo_path)
@@ -232,7 +237,10 @@ class GitHubRepoPuller:
             self._git_remote_cmd('clone', '--mirror', clone_url, str(tmp_path)),
             check=True
         )
-        self._run(['git', '-C', str(tmp_path), 'config', '--local', 'core.bare', 'false'], check=False)
+        self._run(
+            ['git', '-C', str(tmp_path), 'config', '--local', 'core.bare', 'false'],
+            check=False
+        )
         self._run(['git', '-C', str(tmp_path), 'reset', '--hard', 'HEAD'], check=False)
         if repo_path.exists():
             shutil.rmtree(repo_path, ignore_errors=True)
@@ -253,7 +261,7 @@ class GitHubRepoPuller:
 
         logging.info("Cloning repository (all branches): %s", repo_name)
         try:
-            self._clone_with_all_branches(repo_name, repo_path, clone_url)
+            self._clone_with_all_branches(repo_path, clone_url)
             self.log_all_branches(repo_path)
             logging.info("Cloned all branches of %s", repo_name)
             return {'status': 'cloned', 'message': f"All branches cloned for {repo_name}"}
@@ -265,7 +273,10 @@ class GitHubRepoPuller:
                 logging.info("Retrying with fallback method for %s", repo_name)
                 self._clone_fallback(clone_url, repo_path)
                 self.log_all_branches(repo_path)
-                return {'status': 'cloned', 'message': f"All branches cloned for {repo_name} (fallback)"}
+                return {
+                    'status': 'cloned',
+                    'message': f"All branches cloned for {repo_name} (fallback)"
+                }
             except Exception as fallback_err:
                 logging.error("Fallback also failed for %s: %s", repo_name, fallback_err)
                 if repo_path.exists():
@@ -316,6 +327,42 @@ class GitHubRepoPuller:
         except Exception as e:
             logging.warning("  Could not list branches for %s: %s", repo_path.name, e)
 
+    def _fetch_page(self, params, page):
+        """Fetch one page from the GitHub API with retry logic.
+
+        Returns (data, stop) where *data* is the JSON list (empty list = no more
+        pages) and *stop* is True when the caller should abort the entire scan.
+        """
+        url = f'https://api.github.com/users/{self.github_username}/repos'
+        headers = {
+            'Authorization': f'Bearer {self.github_token}',
+            'Accept': 'application/vnd.github.v3+json'
+        }
+        for attempt in range(self._API_MAX_RETRIES):
+            try:
+                response = requests.get(url, headers=headers, params=params, timeout=30)
+                if response.status_code == 401:
+                    logging.error("GitHub API authentication failed — check GITHUB_TOKEN")
+                    return [], True
+                if response.status_code == 403:
+                    remaining = response.headers.get('X-RateLimit-Remaining', '0')
+                    logging.error("GitHub API rate limit exceeded (remaining: %s)", remaining)
+                    return [], True
+                if response.status_code == 200:
+                    return response.json(), False
+                logging.warning(
+                    "API returned HTTP %d for page %d (attempt %d/%d)",
+                    response.status_code, page, attempt + 1, self._API_MAX_RETRIES
+                )
+            except requests.RequestException as e:
+                logging.error(
+                    "GitHub API error (attempt %d/%d): %s",
+                    attempt + 1, self._API_MAX_RETRIES, e
+                )
+            if attempt < self._API_MAX_RETRIES - 1:
+                time.sleep(2 ** attempt)
+        return [], True
+
     def get_user_repos_from_api(self):
         """Fetch the list of repositories for the configured GitHub user via REST API.
 
@@ -325,47 +372,18 @@ class GitHubRepoPuller:
         """
         if not self.github_token or not self.github_username:
             return []
-        headers = {
-            'Authorization': f'Bearer {self.github_token}',
-            'Accept': 'application/vnd.github.v3+json'
-        }
         repos = []
         page = 1
-        max_retries = 3
         while True:
-            url = f'https://api.github.com/users/{self.github_username}/repos'
-            params = {'page': page, 'per_page': 100, 'type': 'all'}
-            for attempt in range(max_retries):
-                try:
-                    response = requests.get(url, headers=headers, params=params, timeout=30)
-                    if response.status_code == 401:
-                        logging.error("GitHub API authentication failed — check GITHUB_TOKEN")
-                        return repos
-                    if response.status_code == 403:
-                        remaining = response.headers.get('X-RateLimit-Remaining', '0')
-                        logging.error("GitHub API rate limit exceeded (remaining: %s)", remaining)
-                        return repos
-                    if response.status_code == 200:
-                        data = response.json()
-                        if not data:
-                            return repos
-                        repos.extend(data)
-                        page += 1
-                        break
-                    logging.warning(
-                        "API returned HTTP %d for page %d (attempt %d/%d)",
-                        response.status_code, page, attempt + 1, max_retries
-                    )
-                    if attempt < max_retries - 1:
-                        time.sleep(2 ** attempt)
-                    else:
-                        return repos
-                except requests.RequestException as e:
-                    logging.error("GitHub API error (attempt %d/%d): %s", attempt + 1, max_retries, e)
-                    if attempt < max_retries - 1:
-                        time.sleep(2 ** attempt)
-                    else:
-                        return repos
+            data, stop = self._fetch_page(
+                {'page': page, 'per_page': 100, 'type': 'all'}, page
+            )
+            if stop:
+                break
+            if not data:
+                break
+            repos.extend(data)
+            page += 1
         logging.info("Found %d repositories via GitHub API", len(repos))
         return repos
 
