@@ -12,30 +12,45 @@ Environment variables:
     PULL_INTERVAL       — Sleep seconds between sync cycles (default: 3600)
     EXCLUDE_PATTERNS    — Comma-separated regex patterns for repo names to skip
     PARALLEL_WORKERS    — Max parallel clone/update workers (default: 4)
+    DISK_MIN_GB         — Minimum free disk space in GB before aborting (default: 1)
+    GIT_DEPTH           — If set, pass --depth N to git fetch (shallow, all branches)
 
 The script runs as a daemon: it syncs all repos, sleeps PULL_INTERVAL seconds,
 then repeats indefinitely.
 
 Security notes:
-    - The token is embedded in the clone URL (https://USERNAME:TOKEN@...)
-      and lives only in process memory.
-    - The git remote URL stored in .git/config does NOT contain credentials.
+    - Authentication uses GIT_ASKPASS: a temporary helper script that reads the
+      token from the process environment.  The token never appears in:
+        * git command-line arguments (not visible via ps / proc/pid/cmdline)
+        * git remote URLs (not stored in .git/config on disk)
+        * any file on disk (the askpass script contains no secrets)
+    - The token lives only in the process environment (GH_TOKEN env var
+      passed to child git processes) and in the requests HTTP headers sent to
+      the GitHub API.
+    - All log messages containing tokens or credentials are redacted by
+      CredentialFilter before being written to the log file.
 """
 
+import atexit
 import concurrent.futures
 import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
+import textwrap
 import time
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
+from urllib.parse import urlparse
 
 import requests
 
-_LOG_DIR = Path.home() / '.local' / 'share' / 'gh-puller'
+_LOG_DIR = Path.home() / '.local' / 'share' / 'gitgrab'
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
 _LOG_FILE = _LOG_DIR / 'git-puller.log'
 
@@ -50,22 +65,30 @@ logging.basicConfig(
 
 
 class CredentialFilter(logging.Filter):
-    """Redact Authorization headers and Bearer tokens from log records."""
+    """Redact credentials (tokens, passwords) from log records.
+
+    Covers:
+      - ``Authorization: Bearer <token>`` headers
+      - ``https://user:pass@host`` embedded-credential URLs
+      - ``http.extraHeader=Authorization: Bearer <token>`` (git -c syntax)
+      - ``Bearer <token>`` with various boundary chars (|, \x00, etc.)
+    """
+
+    _BEARER_RE = re.compile(
+        r'(?i)(Authorization|extraHeader)\s*[:=]\s*Bearer\s+\S+?(?=[\s\'\"\|,\]\)\x00]|$)'
+    )
+    _URL_CRED_RE = re.compile(
+        r'https://[^/\s:]+:[^/\s@]+@'
+    )
 
     def filter(self, record):
         msg = record.getMessage()
-        if 'Authorization: Bearer ' in msg:
-            msg = re.sub(
-                r'Authorization: Bearer \S+?(?=[\s\'\",\]\)]|$)',
-                'Authorization: Bearer ***REDACTED***',
-                msg
-            )
-        if '@github.com' in msg:
-            msg = re.sub(
-                r'https://[^/\s:]+:[^/\s@]+@',
-                'https://***REDACTED***:***REDACTED***@',
-                msg
-            )
+        msg = self._BEARER_RE.sub(
+            r'\1: Bearer ***REDACTED***', msg
+        )
+        msg = self._URL_CRED_RE.sub(
+            'https://***REDACTED***:***REDACTED***@', msg
+        )
         if record.msg != msg or record.args:
             record.msg = msg
             record.args = ()
@@ -84,15 +107,34 @@ def _error_detail(exc):
 
 
 class GitHubRepoPuller:
-    """Mirrors every repository of a GitHub user, preserving all branches."""
+    """Mirrors every repository of a GitHub user, preserving all branches.
+
+    Authentication is handled via GIT_ASKPASS: a temporary helper script is
+    created at startup and passed to each git subprocess via the environment.
+    The token is **never** embedded in git command-line arguments or remote URLs,
+    which prevents leakage through ``/proc/*/cmdline`` or ``.git/config`` on disk.
+    """
 
     _GIT_TIMEOUT = 300
     _API_MAX_RETRIES = 3
+    _askpass_script_path: str | None = None
+    _script_lock = Lock()
+    shutdown_requested: bool = False
 
-    def __init__(self, git_dir=None, github_token=None, exclude_patterns=None,
-                 parallel_workers=None):
-        resolved_dir = git_dir if git_dir is not None else os.environ.get('GIT_DIR')
-        if resolved_dir is None:
+    # pylint: disable=too-many-arguments,too-many-positional-arguments
+    def __init__(
+        self,
+        git_dir: str | None = None,
+        github_token: str | None = None,
+        exclude_patterns: str | None = None,
+        parallel_workers: int | None = None,
+        disk_min_gb: float | None = None,
+        git_depth: int | None = None,
+    ):
+        resolved_dir: str | Path = (
+            git_dir if git_dir is not None else (os.environ.get('GIT_DIR') or '')
+        )
+        if not resolved_dir:
             resolved_dir = Path('/data/repos')
         self.git_dir = Path(resolved_dir).expanduser().resolve()
         self.github_token = github_token or os.environ.get('GITHUB_TOKEN')
@@ -100,53 +142,137 @@ class GitHubRepoPuller:
         self.git_dir.mkdir(parents=True, exist_ok=True)
 
         raw_exclude = exclude_patterns or os.environ.get('EXCLUDE_PATTERNS', '')
-        self.exclude_patterns = [
+        self.exclude_patterns: list = [
             re.compile(p) for p in raw_exclude.split(',') if p.strip()
         ] if raw_exclude else []
 
-        self.parallel_workers = (
+        self.parallel_workers: int = (
             parallel_workers or
             int(os.environ.get('PARALLEL_WORKERS', 4))
         )
 
-        self._repos_cache = None
-        self._cache_ts = 0.0
-        self._cache_ttl = 300.0
-
-        logging.info(
-            "Working directory: %s (exclude=%d patterns, workers=%d)",
-            self.git_dir, len(self.exclude_patterns), self.parallel_workers
+        self.disk_min_gb: float = (
+            disk_min_gb if disk_min_gb is not None
+            else float(os.environ.get('DISK_MIN_GB', '1'))
         )
 
-    def _auth_url(self, url):
-        """Embed the GitHub token into an HTTPS clone URL for authentication."""
-        if not self.github_token or '://' not in url:
-            return url
-        user = self.github_username or 'git'
-        return url.replace('https://', f'https://{user}:{self.github_token}@')
+        self.git_depth: int | None = (
+            git_depth if git_depth is not None
+            else (int(os.environ['GIT_DEPTH']) if 'GIT_DEPTH' in os.environ else None)
+        )
 
-    def _clean_url(self, url):
-        """Strip embedded credentials from a URL."""
-        if not self.github_token or '@' not in url:
-            return url
-        user = self.github_username or 'git'
-        return url.replace(f'{user}:{self.github_token}@', '')
+        self._repos_cache: list | None = None
+        self._cache_ts: float = 0.0
+        self._cache_ttl: float = 300.0
 
-    def _git_remote_cmd(self, *args):
-        """Build a git command list with auth token passed via HTTP header.
+        logging.info(
+            "Working directory: %s (exclude=%d patterns, workers=%d, "
+            "disk_min_gb=%s, git_depth=%s)",
+            self.git_dir, len(self.exclude_patterns), self.parallel_workers,
+            self.disk_min_gb, self.git_depth or 'full'
+        )
 
-        The token is injected as an http.extraHeader config to each git
-        invocation that reaches the network.  It is never written to
-        .git/config or any other file on disk.
+    @classmethod
+    def _ensure_askpass_script(cls):
+        """Create (once) a temporary GIT_ASKPASS helper script.
+
+        The script reads credentials from ``GH_USER`` / ``GH_TOKEN``
+        environment variables — it does **not** embed secrets in the file.
+        Returns the absolute path to the script, or ``None`` on failure.
         """
-        cmd = ['git']
-        if self.github_token:
-            cmd.extend(['-c', f'http.extraHeader=Authorization: Bearer {self.github_token}'])
-        cmd.extend(args)
+        if cls._askpass_script_path is not None:
+            if os.path.exists(cls._askpass_script_path):
+                return cls._askpass_script_path
+            cls._askpass_script_path = None
+
+        with cls._script_lock:
+            if cls._askpass_script_path is not None:
+                if os.path.exists(cls._askpass_script_path):
+                    return cls._askpass_script_path
+                cls._askpass_script_path = None
+
+            is_windows = sys.platform == 'win32'
+            suffix = '.py'
+            content = textwrap.dedent('''\
+                import os, sys
+                msg = sys.argv[1] if len(sys.argv) > 1 else ''
+                if 'user' in msg.lower():
+                    print(os.environ.get('GH_USER', ''))
+                else:
+                    print(os.environ.get('GH_TOKEN', ''))
+            ''')
+            if not is_windows:
+                content = '#!/usr/bin/env python3\n' + content
+
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode='w', suffix=suffix, prefix='gitgrab_askpass_',
+                    delete=False
+                ) as f:
+                    f.write(content)
+                    script_path = f.name
+
+                if not is_windows:
+                    os.chmod(script_path, 0o700)
+
+                cls._askpass_script_path = script_path
+                atexit.register(cls._cleanup_askpass_script)
+
+                logging.debug("GIT_ASKPASS helper created: %s", script_path)
+            except OSError:
+                logging.warning(
+                    "Could not create GIT_ASKPASS helper — "
+                    "token will not be available for git"
+                )
+                cls._askpass_script_path = None
+
+        return cls._askpass_script_path
+
+    @classmethod
+    def _cleanup_askpass_script(cls):
+        """Remove the temporary GIT_ASKPASS helper script at process exit."""
+        if cls._askpass_script_path and os.path.exists(cls._askpass_script_path):
+            try:
+                os.unlink(cls._askpass_script_path)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _scrub_url_credentials(url):
+        """Remove any embedded credentials from a URL."""
+        parsed = urlparse(url)
+        if parsed.username or parsed.password:
+            clean = parsed._replace(netloc=parsed.hostname if parsed.hostname else parsed.netloc)
+            return clean.geturl()
+        return url
+
+    @staticmethod
+    def _validate_clone_url(clone_url):
+        """Warn if the clone URL uses a non-HTTPS scheme.
+
+        SSH (scheme-less or git+ssh) and empty-scheme URLs are allowed for
+        existing repos that use key-based auth. Raises ``ValueError`` only
+        for explicitly non-HTTPS schemes like ``http://``.
+        """
+        parsed = urlparse(clone_url)
+        if parsed.scheme and parsed.scheme not in ('https', 'ssh', 'git+ssh'):
+            raise ValueError(
+                f"Clone URL must use HTTPS (got scheme '{parsed.scheme}'): {clone_url}"
+            )
+
+    def _build_fetch_cmd(self, base_args):
+        """Build a git fetch command, appending --depth if configured."""
+        cmd = list(base_args)
+        if self.git_depth is not None:
+            cmd.extend(['--depth', str(self.git_depth)])
         return cmd
 
     def _run(self, cmd, check=True, extra_env=None, **kwargs):
         """Wrapper around subprocess.run with a default timeout.
+
+        Automatically injects ``GIT_ASKPASS`` and credential environment
+        variables into every subprocess so that git can authenticate without
+        secrets ever appearing on the command line or in remote URLs.
 
         *extra_env* — optional dict of additional environment variable overrides.
         """
@@ -157,15 +283,31 @@ class GitHubRepoPuller:
         env.pop('GIT_DIR', None)
         if extra_env:
             env.update(extra_env)
+
+        askpass = self._ensure_askpass_script()
+        if askpass is not None and self.github_token:
+            env['GIT_ASKPASS'] = askpass
+            env['GH_USER'] = self.github_username or ''
+            env['GH_TOKEN'] = self.github_token
+
         kwargs.setdefault('env', env)
         return subprocess.run(cmd, check=check, **kwargs)
 
-    def _check_disk_space(self, min_gb=1):
-        """Raise OSError if free disk space falls below *min_gb* gigabytes."""
+    @classmethod
+    def handle_signal(cls, _signum, _frame):
+        """Set the shutdown flag on SIGTERM/SIGINT for graceful shutdown.
+        Does NOT call logging — it is not async-signal-safe.
+        """
+        cls.shutdown_requested = True
+
+    def _check_disk_space(self):
+        """Raise OSError if free disk space falls below configured threshold."""
         usage = shutil.disk_usage(self.git_dir)
         free_gb = usage.free / (1024 ** 3)
-        if free_gb < min_gb:
-            raise OSError(f"Only {free_gb:.1f} GB free, need at least {min_gb} GB")
+        if free_gb < self.disk_min_gb:
+            raise OSError(
+                f"Only {free_gb:.1f} GB free, need at least {self.disk_min_gb} GB"
+            )
 
     def _get_default_branch(self, repo_path):
         """Detect the repository's default branch (origin/HEAD -> main/master).
@@ -179,7 +321,7 @@ class GitHubRepoPuller:
             )
             if result.returncode == 0:
                 return result.stdout.strip().replace('refs/remotes/origin/', '')
-        except Exception:
+        except (subprocess.CalledProcessError, OSError):
             pass
         for candidate in ('main', 'master'):
             result = self._run(
@@ -224,31 +366,35 @@ class GitHubRepoPuller:
     def _clone_with_all_branches(self, repo_path, clone_url):
         """Perform a full clone of every remote branch into *repo_path*.
 
+        Uses the clean (credential-free) clone URL.  Authentication is handled
+        transparently via GIT_ASKPASS injected by ``_run``, so the token never
+        appears in ``.git/config`` or on the command line.
+
         Strategy:
           1. git init + remote add origin
           2. git remote set-branches origin '*'   — track every branch
-          3. git fetch --all --prune               — fetch all refs (auth header)
+          3. git fetch --all --prune               — fetch all refs (via askpass)
           4. git checkout <default>                — working tree on default branch
           5. create local tracking branches for the rest
 
         Deleted on failure; the caller must handle cleanup.
         """
         self._check_disk_space()
-        clone_url = self._clean_url(clone_url)
-        auth_url = self._auth_url(clone_url)
+        self._validate_clone_url(clone_url)
         self._run(['git', 'init', str(repo_path)], check=True)
-        self._run(['git', '-C', str(repo_path), 'remote', 'add', 'origin', auth_url], check=True)
+        self._run(
+            ['git', '-C', str(repo_path), 'remote', 'add', 'origin', clone_url],
+            check=True
+        )
         self._run(
             ['git', '-C', str(repo_path), 'remote', 'set-branches', 'origin', '*'],
             check=True
         )
         self._run(
-            ['git', '-C', str(repo_path), 'fetch', '--all', '--prune'],
+            self._build_fetch_cmd(
+                ['git', '-C', str(repo_path), 'fetch', '--all', '--prune']
+            ),
             check=True
-        )
-        self._run(
-            ['git', '-C', str(repo_path), 'remote', 'set-url', 'origin', clone_url],
-            check=False
         )
         default_branch = self._get_default_branch(repo_path)
         self._run(['git', '-C', str(repo_path), 'checkout', default_branch], check=True)
@@ -257,25 +403,21 @@ class GitHubRepoPuller:
     def _update_all_branches(self, repo_path, clone_url):
         """Fetch and force-update every local branch.
 
+        The remote URL is already clean from the initial clone — no credential
+        toggling is needed. Authentication is handled via GIT_ASKPASS.
+
         Returns a list of branch names that were updated.
         """
-        clone_url = self._clean_url(clone_url)
-        auth_url = self._auth_url(clone_url)
-        self._run(
-            ['git', '-C', str(repo_path), 'remote', 'set-url', 'origin', auth_url],
-            check=False
-        )
+        self._validate_clone_url(clone_url)
         self._run(
             ['git', '-C', str(repo_path), 'checkout', '--detach'],
             check=False
         )
         self._run(
-            ['git', '-C', str(repo_path), 'fetch', '--all', '--prune'],
+            self._build_fetch_cmd(
+                ['git', '-C', str(repo_path), 'fetch', '--all', '--prune']
+            ),
             check=True
-        )
-        self._run(
-            ['git', '-C', str(repo_path), 'remote', 'set-url', 'origin', clone_url],
-            check=False
         )
         result = self._run(
             ['git', '-C', str(repo_path), 'rev-parse', '--abbrev-ref', 'HEAD']
@@ -329,26 +471,26 @@ class GitHubRepoPuller:
             )
         return updated
 
-    def _clone_fallback(self, clone_url, repo_path):
-        """Fallback: bare clone + conversion if the init-based flow fails."""
+    def _update_all_branches_fallback(self, clone_url, repo_path):
+        """Fallback: bare clone + conversion if the init-based flow fails.
+
+        Uses the clean clone URL directly — the token is provided via
+        GIT_ASKPASS so it never appears on the command line.
+        """
         tmp_path = repo_path.with_suffix('.tmp')
         if tmp_path.exists():
             shutil.rmtree(tmp_path, ignore_errors=True)
-        clone_url = self._clean_url(clone_url)
-        auth_url = self._auth_url(clone_url)
-        self._run(
-            ['git', 'clone', '--mirror', auth_url, str(tmp_path)],
-            check=True
-        )
+        self._validate_clone_url(clone_url)
+        clone_cmd = ['git', 'clone', '--mirror', clone_url, str(tmp_path)]
+        if self.git_depth is not None:
+            clone_cmd.insert(2, '--depth')
+            clone_cmd.insert(3, str(self.git_depth))
+        self._run(clone_cmd, check=True)
         self._run(
             ['git', '-C', str(tmp_path), 'config', '--local', 'core.bare', 'false'],
             check=False
         )
         self._run(['git', '-C', str(tmp_path), 'reset', '--hard', 'HEAD'], check=False)
-        self._run(
-            ['git', '-C', str(tmp_path), 'remote', 'set-url', 'origin', clone_url],
-            check=False
-        )
         if repo_path.exists():
             shutil.rmtree(repo_path, ignore_errors=True)
         tmp_path.rename(repo_path)
@@ -386,7 +528,7 @@ class GitHubRepoPuller:
                 shutil.rmtree(repo_path, ignore_errors=True)
             try:
                 logging.info("Retrying with fallback method for %s", repo_name)
-                self._clone_fallback(clone_url, repo_path)
+                self._update_all_branches_fallback(clone_url, repo_path)
                 self.log_all_branches(repo_path)
                 return {
                     'status': 'cloned',
@@ -406,6 +548,7 @@ class GitHubRepoPuller:
         clone_url = self._get_remote_url(repo_path)
         if not clone_url:
             return {'status': 'error', 'message': 'No remote origin found'}
+        clone_url = self._scrub_url_credentials(clone_url)
 
         logging.info("Updating repository: %s", repo_name)
         try:
@@ -566,27 +709,39 @@ class GitHubRepoPuller:
 
 def main():
     """Entry point: read env, create puller, loop forever."""
+    signal.signal(signal.SIGTERM, GitHubRepoPuller.handle_signal)
+    signal.signal(signal.SIGINT, GitHubRepoPuller.handle_signal)
+
     git_dir = os.environ.get('GIT_DIR')
     interval = int(os.environ.get('PULL_INTERVAL', 3600))
     exclude_patterns = os.environ.get('EXCLUDE_PATTERNS')
     parallel_workers = os.environ.get('PARALLEL_WORKERS')
-    kwargs = {}
+    kwargs: dict = {}
     if exclude_patterns is not None:
         kwargs['exclude_patterns'] = exclude_patterns
     if parallel_workers is not None:
         kwargs['parallel_workers'] = int(parallel_workers)
     puller = GitHubRepoPuller(git_dir, **kwargs)
-    while True:
+    while not GitHubRepoPuller.shutdown_requested:
         try:
             puller.run()
+            if GitHubRepoPuller.shutdown_requested:
+                break
             logging.info("Waiting %d seconds until next run...", interval)
-            time.sleep(interval)
+            for _ in range(interval):
+                if GitHubRepoPuller.shutdown_requested:
+                    break
+                time.sleep(1)
         except KeyboardInterrupt:
             logging.info("Shutting down...")
             break
         except Exception as e:
+            if GitHubRepoPuller.shutdown_requested:
+                logging.info("Shutting down after signal...")
+                break
             logging.error("Unexpected error: %s", e)
             time.sleep(interval)
+    logging.info("Shutdown complete.")
 
 
 if __name__ == '__main__':

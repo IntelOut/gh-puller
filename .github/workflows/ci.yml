@@ -14,12 +14,16 @@ jobs:
         python-version: ["3.10", "3.11", "3.12"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
 
       - name: Install dependencies
         run: |
@@ -28,13 +32,13 @@ jobs:
           pip install -r requirements.txt
 
       - name: Ruff
-        run: ruff check pull_repos.py
+        run: ruff check gitgrab.py
 
       - name: Mypy
-        run: mypy pull_repos.py
+        run: mypy gitgrab.py
 
       - name: Pylint
-        run: pylint pull_repos.py
+        run: pylint gitgrab.py
 
       - name: Pytest
         run: pytest -v

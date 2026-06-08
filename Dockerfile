@@ -9,7 +9,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY pull_repos.py .
+COPY gitgrab.py healthcheck.py .
 
 RUN mkdir -p /var/log /data/repos
 
@@ -19,6 +19,6 @@ ENV GIT_DIR=/data/repos \
     PULL_INTERVAL=3600
 
 HEALTHCHECK --interval=60s --timeout=5s --start-period=30s \
-    CMD python3 -c "import os; exit(0 if os.path.exists('/app/pull_repos.py') else 1)"
+    CMD python3 /app/healthcheck.py
 
-ENTRYPOINT ["python3", "pull_repos.py"]
+ENTRYPOINT ["python3", "gitgrab.py"]
