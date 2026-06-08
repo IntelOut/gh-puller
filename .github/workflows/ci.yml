@@ -28,13 +28,13 @@ jobs:
           pip install -r requirements.txt
 
       - name: Ruff
-        run: ruff check pull_repos.py
+        run: ruff check gitgrab.py
 
       - name: Mypy
-        run: mypy pull_repos.py
+        run: mypy gitgrab.py
 
       - name: Pylint
-        run: pylint pull_repos.py
+        run: pylint gitgrab.py
 
       - name: Pytest
         run: pytest -v

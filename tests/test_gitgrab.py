@@ -1,4 +1,4 @@
-"""Tests for gh-puller."""
+"""Tests for GitGrab."""
 
 import logging
 import os
@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from pull_repos import CredentialFilter, GitHubRepoPuller, _error_detail
+from gitgrab import CredentialFilter, GitHubRepoPuller, _error_detail
 
 
 @pytest.fixture
@@ -55,7 +55,7 @@ class TestGitHubRepoPuller:
         with pytest.raises(OSError, match='GB free'):
             puller._check_disk_space(min_gb=1e9)
 
-    @patch('pull_repos.subprocess.run')
+    @patch('gitgrab.subprocess.run')
     def test_run_returns_stdout(self, mock_run, puller):
         mock_run.return_value = MagicMock(stdout='main\n', returncode=0)
         result = puller._run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'])
@@ -69,7 +69,7 @@ class TestGitHubRepoPuller:
         puller = GitHubRepoPuller(git_dir='/tmp', github_token='t')
         assert puller.get_user_repos_from_api() == []
 
-    @patch('pull_repos.requests.get')
+    @patch('gitgrab.requests.get')
     def test_fetch_page_200(self, mock_get, puller):
         mock_get.return_value = MagicMock(
             status_code=200,
@@ -80,14 +80,14 @@ class TestGitHubRepoPuller:
         assert not stop
         assert len(data) == 2
 
-    @patch('pull_repos.requests.get')
+    @patch('gitgrab.requests.get')
     def test_fetch_page_401(self, mock_get, puller):
         mock_get.return_value = MagicMock(status_code=401, headers={})
         data, stop = puller._fetch_page({'page': 1, 'per_page': 100, 'type': 'all'}, 1)
         assert stop
         assert data == []
 
-    @patch('pull_repos.requests.get')
+    @patch('gitgrab.requests.get')
     def test_fetch_page_403(self, mock_get, puller):
         mock_get.return_value = MagicMock(
             status_code=403, headers={'X-RateLimit-Remaining': '0'}
@@ -140,27 +140,27 @@ class TestGitRemoteCmd:
 
 
 class TestRunExtraEnv:
-    @patch('pull_repos.subprocess.run')
+    @patch('gitgrab.subprocess.run')
     def test_extra_env_overrides(self, mock_run, puller):
         mock_run.return_value = MagicMock(stdout='', returncode=0)
         puller._run(['git', 'status'], extra_env={'GIT_TERMINAL_PROMPT': '1'})
         env_passed = mock_run.call_args.kwargs['env']
         assert env_passed['GIT_TERMINAL_PROMPT'] == '1'
 
-    @patch('pull_repos.subprocess.run')
+    @patch('gitgrab.subprocess.run')
     def test_base_env_present(self, mock_run, puller):
         mock_run.return_value = MagicMock(stdout='', returncode=0)
         puller._run(['git', 'status'])
         env_passed = mock_run.call_args.kwargs['env']
         assert env_passed['GIT_TERMINAL_PROMPT'] == '0'
 
-    @patch('pull_repos.subprocess.run')
+    @patch('gitgrab.subprocess.run')
     def test_run_passes_check(self, mock_run, puller):
         mock_run.return_value = MagicMock(stdout='', returncode=0)
         puller._run(['git', 'status'], check=False)
         assert mock_run.call_args.kwargs['check'] is False
 
-    @patch('pull_repos.subprocess.run')
+    @patch('gitgrab.subprocess.run')
     def test_git_dir_removed(self, mock_run, puller):
         mock_run.return_value = MagicMock(stdout='', returncode=0)
         import os
@@ -174,14 +174,14 @@ class TestRunExtraEnv:
 
 
 class TestGetRemoteUrl:
-    @patch('pull_repos.subprocess.run')
+    @patch('gitgrab.subprocess.run')
     def test_returns_url(self, mock_run, puller):
         mock_run.return_value = MagicMock(stdout='https://github.com/user/repo.git\n', returncode=0)
         with tempfile.TemporaryDirectory() as tmp:
             result = puller._get_remote_url(Path(tmp))
         assert result == 'https://github.com/user/repo.git'
 
-    @patch('pull_repos.subprocess.run')
+    @patch('gitgrab.subprocess.run')
     def test_no_origin(self, mock_run, puller):
         mock_run.side_effect = subprocess.CalledProcessError(128, ['git'])
         with tempfile.TemporaryDirectory() as tmp:
@@ -395,14 +395,14 @@ class TestAggregateStats:
 
 
 class TestFetchPage:
-    @patch('pull_repos.requests.get')
+    @patch('gitgrab.requests.get')
     def test_transient_http_error_retry(self, mock_get, puller):
         mock_get.return_value = MagicMock(status_code=500, headers={}, json=lambda: [])
         data, stop = puller._fetch_page({'page': 1}, 1)
         assert stop
         assert mock_get.call_count == 3
 
-    @patch('pull_repos.requests.get')
+    @patch('gitgrab.requests.get')
     def test_request_exception_retry(self, mock_get, puller):
         mock_get.side_effect = requests.RequestException('connection refused')
         data, stop = puller._fetch_page({'page': 1}, 1)

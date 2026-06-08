@@ -35,7 +35,7 @@ from pathlib import Path
 
 import requests
 
-_LOG_DIR = Path.home() / '.local' / 'share' / 'gh-puller'
+_LOG_DIR = Path.home() / '.local' / 'share' / 'gitgrab'
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
 _LOG_FILE = _LOG_DIR / 'git-puller.log'
 

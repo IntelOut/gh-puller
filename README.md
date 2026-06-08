@@ -1,12 +1,12 @@
-# gh-puller
+# GitGrab
 
-[![CI](https://github.com/IntelOut/gh-puller/actions/workflows/ci.yml/badge.svg)](https://github.com/IntelOut/gh-puller/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/IntelOut/gh-puller?logo=github)](https://github.com/IntelOut/gh-puller/releases/latest)
-[![Docker image](https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker)](https://github.com/IntelOut/gh-puller/pkgs/container/gh-puller)
+[![CI](https://github.com/IntelOut/gitgrab/actions/workflows/ci.yml/badge.svg)](https://github.com/IntelOut/gitgrab/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/IntelOut/gitgrab?logo=github)](https://github.com/IntelOut/gitgrab/releases/latest)
+[![Docker image](https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker)](https://github.com/IntelOut/gitgrab/pkgs/container/gitgrab)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
-**gh-puller** — a daemon that clones and periodically updates every repository of a GitHub user, preserving **all branches** — not just the default one.
+**GitGrab** — a daemon that clones and periodically updates every repository of a GitHub user, preserving **all branches** — not just the default one.
 
 ## Features
 
@@ -38,7 +38,7 @@ pip install -r requirements.txt
 export GITHUB_TOKEN="ghp_..."
 export GITHUB_USERNAME="your-username"
 
-python3 pull_repos.py
+python3 gitgrab.py
 ```
 
 ## Docker
@@ -46,31 +46,31 @@ python3 pull_repos.py
 Pull the pre-built image (recommended):
 
 ```bash
-docker pull ghcr.io/intelout/gh-puller:latest
+docker pull ghcr.io/intelout/gitgrab:latest
 
 mkdir -p repos
 
-docker run -d --name gh-puller \
+docker run -d --name gitgrab \
   -e GITHUB_TOKEN="ghp_xxx" \
   -e GITHUB_USERNAME="your-username" \
   -e PULL_INTERVAL=3600 \
   -v "/data/repos:/data/repos" \
-  ghcr.io/intelout/gh-puller:latest
+  ghcr.io/intelout/gitgrab:latest
 ```
 
 Or build and run locally:
 
 ```bash
-docker build -t gh-puller .
+docker build -t gitgrab .
 
 mkdir -p repos
 
-docker run -d --name gh-puller \
+docker run -d --name gitgrab \
   -e GITHUB_TOKEN="ghp_xxx" \
   -e GITHUB_USERNAME="your-username" \
   -e PULL_INTERVAL=3600 \
   -v "/data/repos:/data/repos" \
-  gh-puller
+  gitgrab
 ```
 
 ## Configuration
@@ -119,7 +119,7 @@ If git operations fail with `remote: invalid credentials`:
 1. Ensure you're using a **Classic PAT** (not fine-grained) with the **`repo`** scope
 2. Verify the token in the container matches the one with `repo` scope:
    ```bash
-   docker exec gh-puller printenv GITHUB_TOKEN | head -c 15
+   docker exec gitgrab printenv GITHUB_TOKEN | head -c 15
    ```
 3. The token is embedded in the clone URL as `https://USERNAME:TOKEN@github.com/...`.
    Only **one** Authorization header is sent (from the URL) — `http.extraHeader` is not used.
