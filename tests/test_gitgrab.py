@@ -48,12 +48,14 @@ class TestGitHubRepoPuller:
         assert not puller._is_excluded('myrepo')
 
     def test_check_disk_space_ok(self, puller):
-        puller._check_disk_space(min_gb=0)
+        puller.disk_min_gb = 0
+        puller._check_disk_space()
         assert True
 
     def test_check_disk_space_fail(self, puller):
+        puller.disk_min_gb = 1e9
         with pytest.raises(OSError, match='GB free'):
-            puller._check_disk_space(min_gb=1e9)
+            puller._check_disk_space()
 
     @patch('gitgrab.subprocess.run')
     def test_run_returns_stdout(self, mock_run, puller):
@@ -125,18 +127,27 @@ class TestModLevel:
 
 
 class TestGitRemoteCmd:
-    def test_with_token(self, puller):
-        cmd = puller._git_remote_cmd('fetch', 'origin')
-        assert 'git' in cmd
-        assert '-c' in cmd
-        auth_idx = cmd.index('-c') + 1
-        assert 'http.extraHeader=Authorization: Bearer test-token' == cmd[auth_idx]
-        assert cmd[-2:] == ['fetch', 'origin']
+    @patch.object(GitHubRepoPuller, '_ensure_askpass_script')
+    def test_askpass_env_injected(self, mock_askpass, puller):
+        mock_askpass.return_value = '/tmp/askpass.sh'
+        with patch('gitgrab.subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(stdout='', returncode=0)
+            puller._run(['git', 'fetch', 'origin'])
+            env_passed = mock_run.call_args.kwargs['env']
+            assert env_passed['GIT_ASKPASS'] == '/tmp/askpass.sh'
+            assert env_passed['GH_TOKEN'] == 'test-token'
+            assert env_passed['GH_USER'] == 'test-user'
 
     def test_without_token(self):
-        puller = GitHubRepoPuller(git_dir='/tmp', github_token=None)
-        cmd = puller._git_remote_cmd('fetch', 'origin')
-        assert cmd == ['git', 'fetch', 'origin']
+        with patch.object(GitHubRepoPuller, '_ensure_askpass_script') as mock_askpass:
+            mock_askpass.return_value = '/tmp/askpass.sh'
+            puller = GitHubRepoPuller(git_dir='/tmp', github_token=None)
+            with patch('gitgrab.subprocess.run') as mock_run:
+                mock_run.return_value = MagicMock(stdout='', returncode=0)
+                puller._run(['git', 'fetch', 'origin'])
+                env_passed = mock_run.call_args.kwargs['env']
+                assert 'GH_TOKEN' not in env_passed
+                assert env_passed.get('GIT_ASKPASS') != '/tmp/askpass.sh'
 
 
 class TestRunExtraEnv:
@@ -214,7 +225,7 @@ class TestGetDefaultBranch:
             result = puller._get_default_branch(Path(tmp))
         assert result == 'master'
 
-    def test_symbolic_ref_exception(self, puller):
+    def test_symbolic_ref_oserror(self, puller):
         with (
             patch.object(GitHubRepoPuller, '_run') as mock_run,
             tempfile.TemporaryDirectory() as tmp,
@@ -223,7 +234,7 @@ class TestGetDefaultBranch:
             def side_effect(cmd, **kwargs):
                 calls.append(cmd)
                 if len(calls) == 1:
-                    raise RuntimeError('unexpected')
+                    raise OSError(2, 'No such file or directory')
                 return MagicMock(stdout='', returncode=1)
             mock_run.side_effect = side_effect
             result = puller._get_default_branch(Path(tmp))
@@ -298,7 +309,7 @@ class TestCloneFullRepo:
         assert result['status'] == 'cloned'
 
     @patch.object(GitHubRepoPuller, '_clone_with_all_branches')
-    @patch.object(GitHubRepoPuller, '_clone_fallback')
+    @patch.object(GitHubRepoPuller, '_update_all_branches_fallback')
     @patch.object(GitHubRepoPuller, 'log_all_branches')
     def test_clone_fallback_success(self, mock_log, mock_fallback, mock_clone, puller):
         mock_clone.side_effect = subprocess.CalledProcessError(
@@ -310,7 +321,7 @@ class TestCloneFullRepo:
         assert '(fallback)' in result['message']
 
     @patch.object(GitHubRepoPuller, '_clone_with_all_branches')
-    @patch.object(GitHubRepoPuller, '_clone_fallback')
+    @patch.object(GitHubRepoPuller, '_update_all_branches_fallback')
     def test_clone_both_fail(self, mock_fallback, mock_clone, puller):
         mock_clone.side_effect = subprocess.CalledProcessError(128, ['git', 'init'])
         mock_fallback.side_effect = subprocess.CalledProcessError(
@@ -410,25 +421,50 @@ class TestFetchPage:
         assert mock_get.call_count == 3
 
 
-class TestAuthUrl:
-    def test_auth_url_with_token(self, puller):
-        result = puller._auth_url('https://github.com/user/repo.git')
-        assert result == 'https://test-user:test-token@github.com/user/repo.git'
+class TestAskpassScript:
+    @classmethod
+    def teardown_class(cls):
+        GitHubRepoPuller._askpass_script_path = None
 
-    def test_auth_url_no_token(self):
-        puller = GitHubRepoPuller(git_dir='/tmp', github_token=None)
-        result = puller._auth_url('https://github.com/user/repo.git')
-        assert result == 'https://github.com/user/repo.git'
+    def test_ensure_askpass_script_creates_file(self):
+        path = GitHubRepoPuller._ensure_askpass_script()
+        assert path is not None
+        assert os.path.exists(path)
+        with open(path) as f:
+            content = f.read()
+            assert 'GH_TOKEN' in content
+            assert 'GH_USER' in content
 
-    def test_clean_url_with_token(self, puller):
-        dirty = 'https://test-user:test-token@github.com/user/repo.git'
-        result = puller._clean_url(dirty)
-        assert result == 'https://github.com/user/repo.git'
+    def test_ensure_askpass_script_caches(self):
+        path1 = GitHubRepoPuller._ensure_askpass_script()
+        path2 = GitHubRepoPuller._ensure_askpass_script()
+        assert path1 == path2
 
-    def test_clean_url_no_token(self):
-        puller = GitHubRepoPuller(git_dir='/tmp', github_token=None)
-        result = puller._clean_url('https://github.com/user/repo.git')
-        assert result == 'https://github.com/user/repo.git'
+    def test_cleanup_removes_file(self):
+        path = GitHubRepoPuller._ensure_askpass_script()
+        assert path and os.path.exists(path)
+        GitHubRepoPuller._cleanup_askpass_script()
+        assert not os.path.exists(path)
+        # Cleanup idempotent
+        GitHubRepoPuller._cleanup_askpass_script()
+
+
+class TestValidateCloneUrl:
+    def test_https_ok(self):
+        GitHubRepoPuller._validate_clone_url('https://github.com/user/repo.git')
+        assert True
+
+    def test_http_raises(self):
+        with pytest.raises(ValueError, match='HTTPS'):
+            GitHubRepoPuller._validate_clone_url('http://github.com/user/repo.git')
+
+    def test_ssh_allowed(self):
+        GitHubRepoPuller._validate_clone_url('ssh://git@github.com/user/repo.git')
+        assert True
+
+    def test_scp_syntax_allowed(self):
+        GitHubRepoPuller._validate_clone_url('git@github.com:user/repo.git')
+        assert True
 
 
 class TestCredentialFilter:
@@ -447,6 +483,7 @@ class TestCredentialFilter:
         assert "***REDACTED***'" in record.msg
         assert "'clone'" in record.msg
         assert "Bearer ***REDACTED***" in record.msg
+        assert "Authorization" in record.msg
 
     def test_redact_plain_string(self):
         record = logging.LogRecord(
@@ -469,7 +506,7 @@ class TestCredentialFilter:
         )
         filtr = CredentialFilter()
         filtr.filter(record)
-        assert '***REDACTED***' in record.msg
+        assert 'Authorization: Bearer ***REDACTED***' in record.msg
         assert 'ghp_abc123' not in record.msg
 
     def test_redact_url_token(self):
@@ -493,3 +530,15 @@ class TestCredentialFilter:
         filtr = CredentialFilter()
         filtr.filter(record)
         assert record.msg == msg
+
+    def test_extra_header_redacted(self):
+        record = logging.LogRecord(
+            name='test', level=logging.ERROR,
+            pathname='', lineno=0,
+            msg="http.extraHeader=Authorization: Bearer ghp_secret_abc",
+            args=(), exc_info=None
+        )
+        filtr = CredentialFilter()
+        filtr.filter(record)
+        assert "***REDACTED***" in record.msg
+        assert "ghp_secret_abc" not in record.msg

@@ -4,7 +4,7 @@ build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
 name = "gitgrab"
-version = "1.0.13"
+version = "1.1.1"
 description = "GitHub all-branches repository mirror"
 requires-python = ">=3.10"
 dependencies = [

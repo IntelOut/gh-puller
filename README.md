@@ -20,7 +20,7 @@
 - **Cached** repository list to avoid redundant API calls
 - Docker image ready with healthcheck
 - Rate-limit aware GitHub API client with retry and backoff
-- Token embedded in clone URL (`USERNAME:TOKEN@`) — **never stored in `.git/config`**
+- **GIT_ASKPASS** authentication — token never touches cmdline or `.git/config`
 - Fallback clone method (`git clone --mirror`) if primary flow fails
 
 ## Prerequisites
@@ -76,13 +76,15 @@ docker run -d --name gitgrab \
 ## Configuration
 
 | Variable | Default | Description |
-|---|---|---|
+|---|---|---|---|
 | `GITHUB_TOKEN` | — | GitHub Classic PAT with `repo` scope (required) |
 | `GITHUB_USERNAME` | — | GitHub username (required) |
 | `GIT_DIR` | `/data/repos` | Directory where repos are stored |
 | `PULL_INTERVAL` | `3600` | Seconds between sync cycles |
 | `EXCLUDE_PATTERNS` | `` | Comma-separated regex patterns for repo names to skip |
 | `PARALLEL_WORKERS` | `4` | Max parallel clone/update workers |
+| `DISK_MIN_GB` | `1` | Minimum free disk space in GB before aborting |
+| `GIT_DEPTH` | — | If set, pass `--depth N` to git fetch (shallow, preserves all branches) |
 
 > **Note on `GIT_DIR`:** This is the application's own env var (where to store repos), not git's `GIT_DIR`.
 > The application strips it from git subprocess environments to avoid conflicts.
@@ -101,40 +103,16 @@ docker run -d --name gitgrab \
 
 ## Security
 
-- The token is embedded in the clone URL (`https://USERNAME:TOKEN@github.com/...`) for git authentication.
-  After `fetch` / `clone` completes, the remote URL is immediately cleaned — **the token is never stored in `.git/config`**.
-- A logging filter redacts `USERNAME:TOKEN@` patterns from log output.
-
-## Troubleshooting
-
-### Permission denied (`cannot mkdir`)
-
-When running in Docker on Windows, the volume directory may be owned by root.
-Redeploy with tag `v1.0.9+` — the container runs as root, avoiding permission issues.
-
-### Invalid credentials
-
-If git operations fail with `remote: invalid credentials`:
-
-1. Ensure you're using a **Classic PAT** (not fine-grained) with the **`repo`** scope
-2. Verify the token in the container matches the one with `repo` scope:
-   ```bash
-   docker exec gitgrab printenv GITHUB_TOKEN | head -c 15
-   ```
-3. The token is embedded in the clone URL as `https://USERNAME:TOKEN@github.com/...`.
-   Only **one** Authorization header is sent (from the URL) — `http.extraHeader` is not used.
-
-### Pathspec 'main' did not match
-
-If you see `error: pathspec 'main' did not match any file(s) known to git`:
-
-The repository's default branch is not `main` or `master`. Use tag `v1.0.9+` which
-checks remote refs (`origin/main`, `origin/master`) instead of local refs after fetch.
-
-### No repos found (only 6 instead of 30+)
-
-The API endpoint `/users/{username}/repos` returns only **public** repos.
-Use tag `v1.0.4+` which uses `/user/repos` — returns all repos the token can access.
+- Authentication uses **`GIT_ASKPASS`**: a temporary helper script is created at
+  startup and passed to each git subprocess via the environment. The script reads
+  the token from the `GITGUB_TOKEN` env var — **the token never appears in**:
+  - **git command-line arguments** (not visible via `ps` / `/proc/*/cmdline`)
+  - **git remote URLs** (not stored in `.git/config` on disk)
+  - **any file on disk** (the askpass script contains no secrets)
+- The GitHub API token is sent as an `Authorization: Bearer` header via the
+  `requests` library — it never leaves process memory.
+- A `CredentialFilter` redacts Bearer tokens and embedded-credential URL
+  patterns from all log output before writing to disk.
 
 ## Development
 
